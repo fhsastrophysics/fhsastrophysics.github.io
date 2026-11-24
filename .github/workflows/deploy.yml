@@ -23,6 +23,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      # The site moved from /fhs-astrophysics/ to the root in Nov 2026. Printed QR codes
+      # and old Discord posts still use the old address: its page forwards to the root
+      # (keeping #links), and its files stay reachable at their old paths.
+      - name: Keep the old address working
+        run: |
+          mkdir fhs-astrophysics
+          cp .github/pages/old-address.html fhs-astrophysics/index.html
+          cp -r assets app.js styles.css fhs-astrophysics/
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact
