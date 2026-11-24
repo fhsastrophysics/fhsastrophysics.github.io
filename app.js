@@ -1511,20 +1511,21 @@
      changed (Space, PageDown, End, a focus scroll) kept going on the new page: it
      opened part-way down, or past its end in empty sky. Hold the top until that has
      died out, or until the person scrolls again. */
-  let holdRAF = 0;
-  function releaseTop() { if (holdRAF) cancelAnimationFrame(holdRAF); holdRAF = 0; }
+  let holdT = 0;
+  const toTop = () => instantScroll(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" }), () => window.scrollTo(0, 0));
+  const holdTop = () => { if (window.scrollY > 0) toTop(); };
+  function releaseTop() {
+    if (!holdT) return;
+    clearTimeout(holdT); holdT = 0;
+    window.removeEventListener("scroll", holdTop);
+  }
+  // A full second, on scroll events rather than by watching for quiet frames: on a
+  // busy device Chrome reports 0 all along, then lands the old glide ~800ms later.
   function arriveAtTop() {
-    const top = () => instantScroll(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" }), () => window.scrollTo(0, 0));
-    releaseTop(); top();
-    const t0 = performance.now();
-    let still = 0;
-    const hold = (now) => {
-      if (window.scrollY > 0) { top(); still = 0; }
-      still++;
-      if (now - t0 > 700 || (now - t0 > 350 && still > 8)) { holdRAF = 0; return; }   // quiet: nothing is gliding
-      holdRAF = requestAnimationFrame(hold);
-    };
-    holdRAF = requestAnimationFrame(hold);
+    releaseTop();
+    toTop();
+    window.addEventListener("scroll", holdTop, { passive: true });
+    holdT = setTimeout(releaseTop, 1000);
   }
   ["wheel", "touchstart", "pointerdown", "keydown"].forEach((t) => window.addEventListener(t, releaseTop, { passive: true, capture: true }));
 
