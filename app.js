@@ -28,7 +28,7 @@
   const seasonCode = (yr) => { const a = parseInt(yr || "25", 10); return String(a).padStart(2, "0") + String((a + 1) % 100).padStart(2, "0"); };
   const meetingSlug = (m) => `meeting-${seasonCode(m.yr)}-${m.disp || m.n}`;
   function meetingFromSlug(raw) {
-    const rest = raw.slice("meeting-".length);
+    const rest = raw.toLowerCase().slice("meeting-".length);
     const parts = rest.split("-");
     if (parts.length >= 2) {
       const season = parts[0], num = String(parts[1]);
@@ -281,14 +281,24 @@
      ------------------------------------------------------------------- */
   function splitLine(node) {
     const raw = node.textContent;
+    // Read as a title, not letter by letter.
+    node.setAttribute("aria-label", raw);
     node.textContent = "";
     const w = document.createElement("span"); w.className = "split-w";
-    [...raw].forEach((ch, i) => {
-      const s = document.createElement("span"); s.className = "split-c";
-      s.style.transitionDelay = (i * 24) + "ms";
-      // Non-breaking space so inline-block spans don't collapse
-      s.textContent = ch === " " ? " " : ch;
-      w.appendChild(s);
+    w.setAttribute("aria-hidden", "true");
+    // Letters stay together in words, and words can wrap: as one unbreakable line
+    // "Meeting Archive" ran off a 320px screen.
+    let i = 0;
+    raw.split(" ").forEach((word, k) => {
+      if (k) { w.appendChild(document.createTextNode(" ")); i++; }
+      const g = document.createElement("span"); g.className = "split-g";
+      [...word].forEach((ch) => {
+        const c = document.createElement("span"); c.className = "split-c";
+        c.style.transitionDelay = (i++ * 24) + "ms";
+        c.textContent = ch;
+        g.appendChild(c);
+      });
+      w.appendChild(g);
     });
     node.appendChild(w);
   }
@@ -363,13 +373,19 @@
       astro.style.cursor = "grabbing";
       try { astro.setPointerCapture(e.pointerId); } catch {}
     });
-    window.addEventListener("pointerup", () => {
+    const letGo = (fling) => {
       if (!grabbed) return;
       grabbed = false;
       astro.style.cursor = "grab";
+      if (!fling) return;
       vx = (tmx - mx) * 40;                 // kick a velocity the spring absorbs
       vy = (tmy - my) * 40;
-    });
+    };
+    window.addEventListener("pointerup", () => letGo(true));
+    // A drag can also end without a pointerup (touch taken over by scrolling, a
+    // system gesture, switching apps): it stayed grabbed and kept chasing the cursor.
+    window.addEventListener("pointercancel", () => letGo(false));
+    window.addEventListener("blur", () => letGo(false));
 
     function onMove(e) {
       const pt = (e.touches && e.touches[0]) ? e.touches[0] : e;
@@ -487,7 +503,7 @@
       e.preventDefault();
       const text = btn.dataset.copy || "";
       if (!text) return;
-      copyText(text).finally(() => toast("Copied · " + text));
+      copyAndSay(text);
     });
     // Also allow modifier-click on the email link to copy
     document.addEventListener("click", (e) => {
@@ -497,7 +513,7 @@
       e.preventDefault();
       const text = a.dataset.copy || "";
       if (!text) return;
-      copyText(text).finally(() => toast("Copied · " + text));
+      copyAndSay(text);
     });
   }
   /* Email links open Gmail's web composer by default (a bare mailto: did nothing on
@@ -515,10 +531,14 @@
       a.removeAttribute("target"); a.removeAttribute("rel");
     });
   }
+  // If neither copy method worked, show the address itself rather than claim it was copied.
+  function copyAndSay(text) {
+    copyText(text).then((ok) => toast(ok === false ? text : "Copied · " + text), () => toast(text));
+  }
   function copyText(text) {
     // Try clipboard API first; fall back to execCommand on any failure
     if (navigator.clipboard && window.isSecureContext) {
-      return navigator.clipboard.writeText(text).catch(() => execCopy(text));
+      return navigator.clipboard.writeText(text).then(() => true, () => execCopy(text));
     }
     return execCopy(text);
   }
@@ -527,8 +547,9 @@
       const ta = document.createElement("textarea");
       ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
       document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); } catch {}
-      document.body.removeChild(ta); res();
+      let ok = false;
+      try { ok = document.execCommand("copy"); } catch {}
+      document.body.removeChild(ta); res(ok);
     });
   }
 
@@ -740,43 +761,127 @@
   /* -------------------------------------------------------------------
      Overlays (meeting preview, atlas viewer, photo viewer) — shared plumbing
 
-     Back closes a viewer. Opening one from the page pushes a history entry and
-     closing it from the UI pops that entry, so the browser's Back button, the
-     Android back key and the iOS edge swipe dismiss the viewer instead of
-     changing the page underneath it and leaving it stranded on top, scroll-locked.
-     The page behind is inert while a viewer is open, so Tab and VoiceOver stay in
-     the dialog.
+     One viewer at a time, and its history entry says which one: opening pushes
+     { overlay, ...what it shows }, so Back, the Android back key and the iOS edge
+     swipe close it, Forward reopens it, and a reload comes back to it. Closing
+     from the page pops that entry.
+
+     syncToUrl() in the router is the only thing that reacts to history: it reads
+     the address + history.state and makes the page match. Nothing else opens or
+     closes a viewer on popstate or hashchange.
      ------------------------------------------------------------------- */
-  const overlayPushed = { meeting: false, atlas: false, photo: false };
-  function pushOverlay(name, url) {
-    try { history.pushState({ overlay: name }, "", url || location.href); overlayPushed[name] = true; }
-    catch (e) { overlayPushed[name] = false; }
-  }
-  // Close from the UI: pop our own history entry if it's the current one (the
-  // popstate handler then does the closing), otherwise close directly.
-  function requestClose(name, closeNow) {
-    if (overlayPushed[name] && history.state && history.state.overlay === name) {
-      overlayPushed[name] = false;   // a second close in the same frame must not go back twice
-      history.back(); return;
-    }
-    closeNow();
-  }
-  function setPageInert(on) {
-    [$("#router"), $("#nav"), $(".footer"), $("#backTop"), $(".skip-link")].forEach((n) => {
-      if (!n) return;
-      if (on) n.setAttribute("inert", ""); else n.removeAttribute("inert");
-    });
-    document.body.style.overflow = on ? "hidden" : "";
-  }
+  const OVERLAYS = {
+    meeting: { sel: "#meetingModal" },
+    atlas: { sel: "#atlasLightbox" },
+    photo: { sel: "#photoLightbox" },
+  };
   const isOpen = (sel) => { const n = $(sel); return !!(n && n.classList.contains("open")); };
+  const openOverlayName = () => Object.keys(OVERLAYS).find((k) => isOpen(OVERLAYS[k].sel)) || null;
+  let overlayPushed = false;     // the current history entry is the open viewer's own
+  let overlayFocus = null;       // where focus goes when it closes
+  const histState = () => (history.state && typeof history.state === "object" ? history.state : {});
+  function replaceEntry(state, url) { try { history.replaceState(state, "", url || location.href); } catch (e) {} }
+
+  // history.back() is asynchronous. Until its popstate lands, opening a viewer or
+  // following a link would act on the entry that is about to be popped, so it
+  // waits. (Escape then a quick tap on a card used to open it and lose it again.)
+  let popPending = null, afterPop = null;
+  function popOwnEntry() {
+    clearTimeout(popPending);
+    popPending = setTimeout(popDone, 600);      // in case the browser never reports it
+    history.back();
+  }
+  function popDone() {
+    if (popPending === null) return;
+    clearTimeout(popPending); popPending = null;
+    const run = afterPop; afterPop = null;
+    if (run) run();
+  }
+  const waitForPop = (fn) => { if (popPending === null) return false; afterPop = fn; return true; };
+
+  /* The single owner of "what is the page behind this allowed to do". Called after
+     anything opens or closes; it reads the real state instead of trusting callers,
+     so one thing closing can't unlock the page under another. */
+  function refreshPageLock() {
+    const viewer = !!openOverlayName();
+    const links = $("#navLinks");
+    const menu = !!(links && links.classList.contains("open"));
+    const set = (n, on) => { if (!n) return; if (on) n.setAttribute("inert", ""); else n.removeAttribute("inert"); };
+    ["#router", ".footer", "#backTop", ".skip-link"].forEach((q) => set($(q), viewer || menu));
+    set($("#nav"), viewer);
+    document.body.style.overflow = viewer ? "hidden" : "";
+    document.body.classList.toggle("plb-open", isOpen("#photoLightbox"));
+  }
   function refocus(node) {
-    if (node && node.focus && document.contains(node)) { try { node.focus({ preventScroll: true }); } catch (e) { node.focus(); } }
+    if (node && node !== document.body && node.focus && document.contains(node)) { try { node.focus({ preventScroll: true }); } catch (e) { node.focus(); } }
+  }
+
+  /* Show a viewer. `fill` puts the content in; `entry` is its history state.
+     own: "push" (opened from the page), "keep" (already standing on its entry:
+     Forward, reload), "none" (arrived by a plain link: nothing to pop). */
+  function showOverlay(name, fill, entry, own, url) {
+    if (own === "push" && waitForPop(() => showOverlay(name, fill, entry, own, url))) return;
+    if (own === "push" && jump && !jump.swapped) return;      // the page under it is on its way out
+    const node = $(OVERLAYS[name].sel); if (!node) return;
+    const other = openOverlayName();
+    if (other && other !== name) hideOverlay(other);
+    const wasOpen = isOpen(OVERLAYS[name].sel);
+    closeNav();
+    if (!wasOpen) overlayFocus = document.activeElement;
+    fill();
+    if (own === "push" && !wasOpen) {
+      try { history.pushState(Object.assign({ seen: 1, overlay: name, from: currentRoute }, entry), "", url || location.href); overlayPushed = true; }
+      catch (e) { overlayPushed = false; }
+    } else if (own !== "push") overlayPushed = own === "keep";
+    node.classList.add("open");
+    node.setAttribute("aria-hidden", "false");
+    refreshPageLock();
+    // Each viewer starts at its title. The panel keeps its scroll offset while
+    // hidden, so the next one opened mid-way down with its title out of view.
+    if (!wasOpen || own !== "push") $$(".modal__panel, .lightbox__body", node).forEach((n) => { n.scrollTop = 0; });
+    const closeBtn = $(".modal__close", node);
+    if (closeBtn) closeBtn.focus({ preventScroll: true });
+  }
+  // Take it off screen. History is the caller's business.
+  function hideOverlay(name) {
+    const node = $(OVERLAYS[name].sel); if (!node || !node.classList.contains("open")) return;
+    node.classList.remove("open");
+    node.setAttribute("aria-hidden", "true");
+    overlayPushed = false;
+    refreshPageLock();
+    refocus(overlayFocus); overlayFocus = null;
+    if (name === "photo") PLB.ev = null;
+  }
+  // Close from the page: ✕, backdrop, Escape.
+  function requestClose(name) {
+    if (popPending !== null && afterPop) { afterPop = null; return; }   // closing something that hasn't opened yet
+    if (!isOpen(OVERLAYS[name].sel)) return;
+    const own = overlayPushed && histState().overlay === name;
+    hideOverlay(name);
+    if (own) popOwnEntry();
+    // Arrived by link: the address names this meeting, so put back the page on screen.
+    else if (/^#meeting-/i.test(location.hash)) replaceEntry({ seen: 1 }, "#" + (currentRoute || "/meetings"));
+  }
+  function wireOverlay(name, extraKeys) {
+    const node = $(OVERLAYS[name].sel); if (!node) return;
+    node.addEventListener("click", (e) => { if (e.target.closest("[data-close]")) requestClose(name); });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { if (isOpen(OVERLAYS[name].sel)) requestClose(name); }
+      else if (extraKeys && isOpen(OVERLAYS[name].sel) && !e.altKey && !e.metaKey && !e.ctrlKey) extraKeys(e);
+    });
+  }
+  /* A held key repeats. Enter on a card opened its viewer, the next repeat pressed
+     the ✕ focus had just moved to, the next opened it again... */
+  function initKeyRepeatGuard() {
+    document.addEventListener("keydown", (e) => {
+      if (!e.repeat || (e.key !== "Enter" && e.key !== " ")) return;
+      if (e.target.closest && e.target.closest("a, button, summary, [role='button']")) { e.preventDefault(); e.stopPropagation(); }
+    }, true);
   }
 
   /* -------------------------------------------------------------------
      Meeting modal
      ------------------------------------------------------------------- */
-  let lastFocus = null;
   // On a phone the one-column previews (deck cover + a full-width handout page,
   // mostly blank paper) pushed "Open slide deck" 400-500px below the fold of the
   // modal. There the actions lead, right under the summary; desktop keeps them
@@ -789,10 +894,13 @@
     else if (thumbs.nextElementSibling !== actions) thumbs.after(actions);
     actions.classList.toggle("modal__actions--lead", ACTIONS_LEAD.matches);
   }
-  function openMeetingModal(n, opts = {}) {
+  // own: see showOverlay
+  function openMeetingModal(n, own) {
     const m = MEETINGS.find((x) => x.n === n); if (!m) return;
-    const modal = $("#meetingModal"); if (!modal) return;
-    if (!modal.classList.contains("open")) lastFocus = document.activeElement;
+    showOverlay("meeting", () => fillMeetingModal(m), { n: m.n }, own || "push", "#" + meetingSlug(m));
+  }
+  function fillMeetingModal(m) {
+    const modal = $("#meetingModal");
 
     $("#modalEyebrow").textContent = `Meeting ${m.disp || pad(m.n)} · ${sentence(m.kind)}`;
     $("#modalTitle").textContent = m.title;
@@ -844,54 +952,10 @@
       after.after(a); after = a;
     });
     placeModalActions();
-
-    const slug = "#" + meetingSlug(m);
-    const wasOpen = modal.classList.contains("open");
-    if (opts.deep) {
-      if (history.state && history.state.overlay === "meeting") {
-        // Forward landed back on our own entry: reuse it, so closing pops it.
-        overlayPushed.meeting = true;
-      } else {
-        // Arrived by link: the URL already names this meeting, nothing to push.
-        overlayPushed.meeting = false;
-        try { history.replaceState(null, "", slug); } catch (e) {}
-      }
-    } else if (!wasOpen) {
-      pushOverlay("meeting", slug);
-    }
-
-    modal.classList.add("open");
-    // Each preview starts at its title. The panel keeps its scroll offset while
-    // hidden, so the next one opened mid-way down with its title out of view.
-    if (!wasOpen) { const pnl = modal.querySelector(".modal__panel"); if (pnl) pnl.scrollTop = 0; }
-    modal.setAttribute("aria-hidden", "false");
-    setPageInert(true);
-    const closeBtn = modal.querySelector(".modal__close");
-    if (closeBtn) closeBtn.focus({ preventScroll: true });
-  }
-  // fromHistory: the URL already moved (Back / swipe), so don't rewrite it.
-  function closeMeetingModal(fromHistory) {
-    const modal = $("#meetingModal"); if (!modal || !modal.classList.contains("open")) return;
-    modal.classList.remove("open");
-    modal.setAttribute("aria-hidden", "true");
-    setPageInert(false);
-    overlayPushed.meeting = false;
-    refocus(lastFocus);
-    // Put back the route that is actually on screen. This used to hard-code
-    // #/meetings, so closing a preview opened from About left the address bar on
-    // Meetings and a reload or shared link landed on the wrong page.
-    if (!fromHistory) {
-      try { if ((location.hash || "").slice(1).indexOf("meeting-") === 0) history.replaceState(null, "", "#" + (currentRoute || "/meetings")); } catch (e) {}
-    }
   }
   function initModal() {
     const modal = $("#meetingModal"); if (!modal) return;
-    modal.addEventListener("click", (e) => {
-      if (e.target.matches("[data-close]") || e.target.closest("[data-close]")) requestClose("meeting", () => closeMeetingModal());
-    });
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && modal.classList.contains("open")) requestClose("meeting", () => closeMeetingModal());
-    });
+    wireOverlay("meeting");
     const onChange = () => placeModalActions();
     if (ACTIONS_LEAD.addEventListener) ACTIONS_LEAD.addEventListener("change", onChange);
     else if (ACTIONS_LEAD.addListener) ACTIONS_LEAD.addListener(onChange);
@@ -1061,44 +1125,20 @@
     });
   }
 
-  let lbLastFocus = null;
-  function openAtlasLightbox(i) {
+  function openAtlasLightbox(i, own) {
     const m = ATLAS[i]; if (!m) return;
-    const lb = $("#atlasLightbox"); if (!lb) return;
-    lbLastFocus = document.activeElement;
-    $("#lbImg").src = atlasImg(m);
-    $("#lbImg").alt = m.name;
-    $("#lbTitle").textContent = m.name;
-    $("#lbSum").textContent = m.desc;
-    $("#lbData").innerHTML = [
-      ["Catalog", m.cat], ["Type", m.type], ["Distance", m.dist], ["Constellation", m.con],
-    ].map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
-    $("#lbCredit").textContent = "Images from the NASA and ESA mission archives";
-    if (!lb.classList.contains("open")) pushOverlay("atlas");
-    lb.classList.add("open");
-    lb.setAttribute("aria-hidden", "false");
-    setPageInert(true);
-    const body = lb.querySelector(".lightbox__body"); if (body) body.scrollTop = 0;
-    const closeBtn = lb.querySelector(".modal__close");
-    if (closeBtn) closeBtn.focus({ preventScroll: true });
+    showOverlay("atlas", () => {
+      $("#lbImg").src = atlasImg(m);
+      $("#lbImg").alt = m.name;
+      $("#lbTitle").textContent = m.name;
+      $("#lbSum").textContent = m.desc;
+      $("#lbData").innerHTML = [
+        ["Catalog", m.cat], ["Type", m.type], ["Distance", m.dist], ["Constellation", m.con],
+      ].map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
+      $("#lbCredit").textContent = "Images from the NASA and ESA mission archives";
+    }, { i }, own || "push");
   }
-  function closeAtlasLightbox() {
-    const lb = $("#atlasLightbox"); if (!lb || !lb.classList.contains("open")) return;
-    lb.classList.remove("open");
-    lb.setAttribute("aria-hidden", "true");
-    setPageInert(false);
-    overlayPushed.atlas = false;
-    refocus(lbLastFocus);
-  }
-  function initAtlasLightbox() {
-    const lb = $("#atlasLightbox"); if (!lb) return;
-    lb.addEventListener("click", (e) => {
-      if (e.target.matches("[data-close]") || e.target.closest("[data-close]")) requestClose("atlas", closeAtlasLightbox);
-    });
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && lb.classList.contains("open")) requestClose("atlas", closeAtlasLightbox);
-    });
-  }
+  function initAtlasLightbox() { wireOverlay("atlas"); }
 
   /* -------------------------------------------------------------------
      Render - Events (speaker card + recording + photo gallery + lightbox)
@@ -1152,8 +1192,12 @@
       const more = e.target.closest(".gallery__more");
       if (more) {
         const art = more.closest(".event");
-        $$(".ph--more", art).forEach((b) => { b.hidden = false; b.classList.add("ph--in"); });
+        const added = $$(".ph--more", art);
+        added.forEach((b) => { b.hidden = false; b.classList.add("ph--in"); });
+        // The button goes away, so keyboard focus moves on to the first photo it added.
+        const had = document.activeElement === more;
         more.remove();
+        if (had && added[0]) added[0].focus({ preventScroll: true });
         return;
       }
       const ph = e.target.closest(".ph");
@@ -1169,7 +1213,7 @@
   }
 
   /* Photo lightbox: one image, ← → / swipe to move, Esc / scrim to close. */
-  const PLB = { ev: null, order: [], k: 0, last: null };
+  const PLB = { ev: null, order: [], k: 0, saveT: 0 };
   // Size the file to the screen. A phone shows the photo ~1100-1300 device px
   // wide, which the 1400px "mid" tier covers; the 2400px masters were a ~4s blank
   // viewer on a slow connection and a 15 MB decode each.
@@ -1184,57 +1228,50 @@
     const img = $("#plbImg");
     const tier = plbTier();
     img.classList.remove("is-in");
-    img.src = evPhoto(ev, n, tier);
-    img.alt = `${ev.name} — photo ${PLB.k + 1} of ${ev.photos.length}`;
     img.onload = () => img.classList.add("is-in");
+    // A photo that won't load falls back to its gallery thumbnail, then to its
+    // description. It used to leave an empty viewer.
+    img.onerror = () => {
+      const small = evPhoto(ev, n, "thumb");
+      if (img.getAttribute("src") !== small) img.src = small;
+      else { img.onerror = null; img.classList.add("is-in"); }
+    };
+    img.src = evPhoto(ev, n, tier);
+    img.alt = `${ev.name}, photo ${PLB.k + 1} of ${ev.photos.length}`;
     $("#plbTitle").textContent = `${ev.name} · ${ev.date}`;
     $("#plbCount").textContent = `${PLB.k + 1} / ${ev.photos.length}`;
+    // Remember which photo this is, so a reload or Forward comes back to it. Waits
+    // for paging to pause: browsers cap how often an entry may be rewritten.
+    clearTimeout(PLB.saveT);
+    PLB.saveT = setTimeout(() => {
+      const st = histState();
+      if (PLB.ev && overlayPushed && st.overlay === "photo") replaceEntry(Object.assign({}, st, { k: PLB.k }));
+    }, 350);
     // Warm the neighbours so paging feels instant.
     [1, -1].forEach((d) => { const p = new Image(); p.src = evPhoto(ev, PLB.order[(PLB.k + d + PLB.order.length) % PLB.order.length], tier); });
   }
-  function openPhotoLightbox(evIdx, k) {
-    const ev = EVENTS[evIdx]; if (!ev) return;
-    const lb = $("#photoLightbox"); if (!lb) return;
-    const art = $(`#event-${ev.slug}`);
-    PLB.ev = ev;
-    PLB.order = (art && art.dataset.order ? art.dataset.order.split(",").map(Number) : ev.photos);
-    if (!lb.classList.contains("open")) { PLB.last = document.activeElement; pushOverlay("photo"); }
-    plbShow(k);
-    lb.classList.add("open");
-    lb.setAttribute("aria-hidden", "false");
-    setPageInert(true);
-    // The viewer is full-screen: hide the header so its menu button doesn't show
-    // through the close button (they sit in the same corner on a phone).
-    document.body.classList.add("plb-open");
-    const c = lb.querySelector(".plb__close"); if (c) c.focus({ preventScroll: true });
-  }
-  function closePhotoLightbox() {
-    const lb = $("#photoLightbox"); if (!lb || !lb.classList.contains("open")) return;
-    lb.classList.remove("open");
-    lb.setAttribute("aria-hidden", "true");
-    document.body.classList.remove("plb-open");
-    setPageInert(false);
-    overlayPushed.photo = false;
-    refocus(PLB.last);
-    PLB.ev = null;
+  function openPhotoLightbox(evIdx, k, own) {
+    const ev = EVENTS[evIdx]; if (!ev || !(k >= 0 && k < ev.photos.length)) return;
+    showOverlay("photo", () => {
+      const art = $(`#event-${ev.slug}`);
+      PLB.ev = ev;
+      PLB.order = (art && art.dataset.order ? art.dataset.order.split(",").map(Number) : ev.photos);
+      plbShow(k);
+    }, { ev: evIdx, k }, own || "push");
   }
   function initPhotoLightbox() {
     const lb = $("#photoLightbox"); if (!lb) return;
-    const close = () => requestClose("photo", closePhotoLightbox);
+    wireOverlay("photo", (e) => {
+      if (e.key === "ArrowRight") plbShow(PLB.k + 1);
+      else if (e.key === "ArrowLeft") plbShow(PLB.k - 1);
+    });
     lb.addEventListener("click", (e) => {
       const nav = e.target.closest(".plb__nav");
       if (nav) { plbShow(PLB.k + (+nav.dataset.dir)); return; }
-      if (e.target.matches("[data-close]") || e.target.closest("[data-close]")) { close(); return; }
       // The stage and figure fill the screen and sit over the scrim, so a tap
       // beside the photo never reached it. Anything that isn't the photo, its
-      // caption or an arrow now closes the viewer.
-      if (!e.target.closest("#plbImg, .plb__cap, .plb__nav")) close();
-    });
-    document.addEventListener("keydown", (e) => {
-      if (!lb.classList.contains("open")) return;
-      if (e.key === "Escape") close();
-      else if (e.key === "ArrowRight") plbShow(PLB.k + 1);
-      else if (e.key === "ArrowLeft") plbShow(PLB.k - 1);
+      // caption or an arrow now closes the viewer. ([data-close] is wireOverlay's.)
+      if (!e.target.closest("[data-close], #plbImg, .plb__cap, .plb__nav")) requestClose("photo");
     });
     // Swipe: one finger, mostly sideways, page not zoomed. It used to read any
     // touch, so pinching to zoom (or a vertical drag) flipped to another photo.
@@ -1325,11 +1362,13 @@
       // had to be several percent into view before its 0.9s reveal even started —
       // guaranteeing you'd watch it finish. Trigger a quarter-viewport early
       // instead, so at normal reading speed the fade is done on arrival.
-      if (!revealIO) revealIO = new IntersectionObserver((es) => {
-        es.forEach((e) => {
-          if (e.isIntersecting) showReveal(e.target, scrollVel > FLING);
-        });
-      }, { threshold: 0, rootMargin: `0px 0px ${REVEAL_LEAD * 100}% 0px` });
+      try {
+        if (!revealIO) revealIO = new IntersectionObserver((es) => {
+          es.forEach((e) => {
+            if (e.isIntersecting) showReveal(e.target, scrollVel > FLING);
+          });
+        }, { threshold: 0, rootMargin: `0px 0px ${REVEAL_LEAD * 100}% 0px` });
+      } catch (err) { nodes.forEach((n) => n.classList.add("is-visible")); return; }
       nodes.forEach((n) => { pendingReveal.add(n); revealIO.observe(n); });
     };
     let sweepT;
@@ -1435,6 +1474,9 @@
       btn.classList.toggle("on", next);
     });
     btn.addEventListener("click", () => {
+      // The button fades out once you arrive; leave focus at the top of the page
+      // instead of on a button that is gone.
+      focusPage();
       window.scrollTo({ top: 0, behavior: REDUCED ? "auto" : "smooth" });
     });
   }
@@ -1443,7 +1485,18 @@
      Router
      ------------------------------------------------------------------- */
   let currentRoute = null;
-  let transitioning = false;
+  let touchInT = 0;
+  // Desktop light-speed jump in progress: { to, opts, swapped, timers } or null.
+  let jump = null;
+  function cancelJump() {
+    if (!jump) return;
+    jump.timers.forEach(clearTimeout);
+    jump = null;
+    $$(".route").forEach((r) => r.classList.remove("warp-out", "warp-in", "prewarm"));
+    const bloom = $("#warpBloom"); if (bloom) bloom.classList.remove("on");
+    document.body.classList.remove("warping");
+    if (window.__warp) window.__warp(0);
+  }
   // Scroll without html's scroll-behavior:smooth. behavior:"instant" is the clean
   // way; older WebKit throws on that enum value, so fall back to switching the CSS
   // off around a plain call (reading it back forces the style to apply first).
@@ -1454,22 +1507,48 @@
     try { modern(); } catch (e) { legacy(); }
     de.style.scrollBehavior = sb;
   }
+  /* Arrive at the top and stay there. A scroll that was still gliding when the page
+     changed (Space, PageDown, End, a focus scroll) kept going on the new page: it
+     opened part-way down, or past its end in empty sky. Hold the top until that has
+     died out, or until the person scrolls again. */
+  let holdRAF = 0;
+  function releaseTop() { if (holdRAF) cancelAnimationFrame(holdRAF); holdRAF = 0; }
+  function arriveAtTop() {
+    const top = () => instantScroll(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" }), () => window.scrollTo(0, 0));
+    releaseTop(); top();
+    const t0 = performance.now();
+    let still = 0;
+    const hold = (now) => {
+      if (window.scrollY > 0) { top(); still = 0; }
+      still++;
+      if (now - t0 > 700 || (now - t0 > 350 && still > 8)) { holdRAF = 0; return; }   // quiet: nothing is gliding
+      holdRAF = requestAnimationFrame(hold);
+    };
+    holdRAF = requestAnimationFrame(hold);
+  }
+  ["wheel", "touchstart", "pointerdown", "keydown"].forEach((t) => window.addEventListener(t, releaseTop, { passive: true, capture: true }));
+
   function normalizeRoute(hash) {
-    let h = (hash || "").replace(/^#/, "");
+    let h = (hash || "").replace(/^#/, "").toLowerCase();
     if (h.startsWith("meeting-")) return "/meetings";
-    // Forgive the way people type and share links: #/About, #/about/
-    h = h.toLowerCase().replace(/\/+$/, "");
-    if (!h || h === "/") return "/";
-    if (h.startsWith("/")) return ROUTES.includes(h) ? h : "/";
-    return "/";
+    // Forgive the way people type and share links: #/About, #/about/, #about,
+    // #//about, #/about?fbclid=...
+    h = h.split(/[?&#]/)[0].replace(/^\/*/, "/").replace(/\/+$/, "") || "/";
+    return ROUTES.includes(h) ? h : "/";
+  }
+  // The meeting the address names, if any.
+  function hashMeeting() {
+    const raw = (location.hash || "").replace(/^#/, "");
+    return /^meeting-/i.test(raw) ? meetingFromSlug(raw) || null : null;
   }
   // Keep the address bar honest: an unknown or sloppy hash that fell back to a
   // route is rewritten to that route's own hash (#/nope -> #/, #/About/ -> #/about).
   function canonicaliseHash(route) {
     const raw = (location.hash || "").replace(/^#/, "");
-    if (!raw || (raw.startsWith("meeting-") && meetingFromSlug(raw))) return;
-    const want = route === "/" ? "/" : route;
-    if (raw !== want) { try { history.replaceState(history.state, "", "#" + want); } catch (e) {} }
+    const mm = hashMeeting();
+    if (!raw || (mm && raw === raw.toLowerCase())) return;
+    const want = mm ? raw.toLowerCase() : route;
+    if (raw !== want) replaceEntry(history.state, "#" + want);
   }
 
   /* Touch: whatever is already on screen when a route arrives is shown at rest.
@@ -1519,6 +1598,13 @@
   function activateRoute(route, opts = {}) {
     const target = document.querySelector(`.route[data-route="${route}"]`);
     if (!target) return;
+    const outgoing = $(".route.active");
+    // Following a link inside the page (or Back) takes focus away with the page it
+    // was on. Remember that, so it can be handed to the new one.
+    const focusLost = !!(currentRoute && outgoing && outgoing.contains(document.activeElement));
+    // This arrival ends whatever roll was still playing, and takes over its cleanup.
+    clearTimeout(touchInT);
+    if (!jump) document.body.classList.remove("warping");
     // Clear every prewarmed copy, not just this one: a finger can land on two
     // links before committing (drag off one, onto another), and a prewarmed
     // route left in the layout is dead weight the compositor keeps paying for.
@@ -1530,32 +1616,26 @@
     $$(".nav__links a, .footer__nav a").forEach((a) => {
       a.classList.toggle("active", a.getAttribute("data-route") === route);
     });
-    $$(".route").forEach((r) => r.classList.remove("active", "enter"));
+    $$(".route").forEach((r) => r.classList.remove("active", "enter", "warp-in", "warp-out", "warp-in-touch"));
     target.classList.add("active");
     target.classList.add("enter");
     // Jump, don't glide. html has scroll-behavior:smooth, so a plain scrollTo(0)
     // animated: the new page appeared at the OLD scroll position and raced up
     // through itself for ~600ms.
-    instantScroll(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" }), () => window.scrollTo(0, 0));
+    arriveAtTop();
     currentRoute = route;
+    if (focusLost) focusPage();
     // Re-entering home: neutralize the hero parallax so its background layers ease
     // out from centre instead of snapping to the live cursor offset mid-warp.
     if (route === "/" && window.__resetHeroParallax) window.__resetHeroParallax();
     playChapter(target);
-    const raw = (location.hash || "").replace(/^#/, "");
-    if (raw.startsWith("meeting-")) {
-      const mm = meetingFromSlug(raw);
-      setTimeout(() => {
-        if (mm) {
-          const yr = mm.yr || "25";
-          const msw = document.querySelector('.route[data-route="/meetings"] .season-switch');
-          if (msw) { const b = $$(".arc__year", msw).find((x) => x.dataset.season === yr); if (b) b.click(); }
-        }
-        const idEl = document.getElementById(mm ? meetingSlug(mm) : raw);
-        if (idEl) idEl.scrollIntoView({ behavior: "smooth", block: "start" });
-        if (mm) openMeetingModal(mm.n, { deep: true });
-      }, 400);
-    }
+  }
+  // Focus the page itself, at its heading, without moving it.
+  function focusPage() {
+    const h = $(".route.active h1");
+    if (!h) return;
+    h.setAttribute("tabindex", "-1");
+    try { h.focus({ preventScroll: true }); } catch (e) { h.focus(); }
   }
 
   /* One continuous hyperspace jump (~1.35s):
@@ -1592,11 +1672,27 @@
   // (The touch light-speed streak overlay lived here. Removed: tablets now use the
   // same instant swap + roll as phones, so nothing spawned it any more.)
 
+  function prewarmHome() {
+    const h = $(".route--home");
+    if (h && !h.classList.contains("active")) h.classList.add("prewarm");
+  }
+  // Put a route on screen and in the address bar.
+  function arrive(route, opts) {
+    activateRoute(route, opts);
+    location.hash = route;
+    if (opts.then) opts.then();
+  }
+
   function navigate(route, opts = {}) {
-    if (transitioning) return;
+    if (waitForPop(() => navigate(route, opts))) return;
+    releaseTop();
+    // A click during a jump is never dropped. Before the swap it just changes where
+    // the jump lands; after it, a new jump starts.
+    if (jump && !jump.swapped && route !== currentRoute) { jump.to = route; jump.opts = opts; if (route === "/") prewarmHome(); return; }
+    if (jump) cancelJump();
     // The logo, or the current page's own link, takes you to its top.
     if (route === currentRoute) { window.scrollTo({ top: 0, behavior: REDUCED ? "auto" : "smooth" }); return; }
-    if (REDUCED) { activateRoute(route, { instant: true }); location.hash = route === "/" ? "/" : route; return; }
+    if (REDUCED) { arrive(route, opts); return; }
 
     // Pre-warm the incoming HOME route (the only heavy one) NOW, at the very start of
     // the jump, so the browser rasterises its big first paint during the warp build-up
@@ -1604,37 +1700,31 @@
     // in CSS. activateRoute() clears the class when it actually swaps in. Desktop only:
     // touch navigation must add ZERO extra layers (the low-memory-iPhone crash guard),
     // and phones already render a heavily trimmed home, so they don't need it.
-    const incoming = document.querySelector(`.route[data-route="${route}"]`);
-    if (route === "/" && !COARSE && incoming && !incoming.classList.contains("active")) {
-      incoming.classList.add("prewarm");
-    }
+    if (route === "/" && !COARSE) prewarmHome();
 
     // Touch: instant swap, then the arrival rolls into place. No streak overlay on
     // any touch device any more — one code path, one behaviour.
     if (COARSE) {
-      document.body.classList.add("warping");   // pause hero anims during the roll
       // Swap NOW. pointerdown already prewarmed this route, so the expensive
       // display:none -> block work is done and this frame is cheap. Tablets get
       // the same thing as phones — the light-speed streak overlay is gone, one
       // code path, one behaviour.
-      activateRoute(route, opts);
+      arrive(route, opts);          // measured at rest, before the roll starts
       const target = $(".route.active");
-      if (target) {
-        target.classList.add("warp-in-touch");
-        setTimeout(() => target.classList.remove("warp-in-touch"), TOUCH_IN + 90);
-      }
-      location.hash = route === "/" ? "/" : route;
-      // Deliberately NOT setting `transitioning` on touch. The swap is synchronous,
+      if (target) target.classList.add("warp-in-touch");
+      document.body.classList.add("warping");   // pause hero anims during the roll
+      touchInT = setTimeout(() => { if (target) target.classList.remove("warp-in-touch"); document.body.classList.remove("warping"); }, TOUCH_IN + 90);
+      // Deliberately no lock on touch. The swap is synchronous,
       // so there is no window where a second navigation could interleave with a
       // first — and holding a lock for the length of the animation would swallow a
       // tap made during it. A tap must never be ignored because something is still
       // moving; the roll simply restarts on the new route.
-      setTimeout(() => document.body.classList.remove("warping"), TOUCH_IN);
       return;
     }
 
     // Desktop (fine pointer) keeps the full light-speed canvas warp.
-    transitioning = true;
+    const j = jump = { to: route, opts, swapped: false, timers: [] };
+    const at = (ms, fn) => j.timers.push(setTimeout(fn, ms));
     document.body.classList.add("warping");   // pause home hero anims during the jump
     const current = $(".route.active");
     const bloom = $("#warpBloom");
@@ -1643,24 +1733,25 @@
     if (current) current.classList.add("warp-out");
     // Bloom flashes as the streaks reach peak length, masking the content swap.
     if (bloom) {
-      setTimeout(() => bloom.classList.add("on"), WARP_SWAP - 140);
-      setTimeout(() => bloom.classList.remove("on"), WARP_SWAP + 380);
+      at(WARP_SWAP - 140, () => bloom.classList.add("on"));
+      at(WARP_SWAP + 380, () => bloom.classList.remove("on"));
     }
     // Swap at peak warp, then fade the incoming page in as the streaks decelerate.
-    setTimeout(() => {
+    at(WARP_SWAP, () => {
+      j.swapped = true;
       if (current) current.classList.remove("warp-out");
-      activateRoute(route, opts);
+      arrive(j.to, j.opts);
       const target = $(".route.active");
       if (target) {
         target.classList.add("warp-in");
-        setTimeout(() => target.classList.remove("warp-in"), 820);
+        at(820, () => target.classList.remove("warp-in"));
       }
-      location.hash = route === "/" ? "/" : route;
-    }, WARP_SWAP);
-    setTimeout(() => { transitioning = false; document.body.classList.remove("warping"); }, WARP_TOTAL);
+    });
+    at(WARP_TOTAL + 20, () => { if (jump === j) cancelJump(); });
   }
 
   function jumpTo(node) {
+    releaseTop();
     instantScroll(() => node.scrollIntoView({ block: "start", behavior: "instant" }), () => node.scrollIntoView({ block: "start" }));
   }
 
@@ -1673,16 +1764,26 @@
       if (!a) return;
       const r = a.getAttribute("data-route");
       if (ROUTES.includes(r)) prewarm(r);
+      // Dragging a link in Safari ends with neither pointerup nor pointercancel, so a
+      // press that never ends expires by itself.
+      dropStale(1500);
     }, { passive: true });
     // If the press didn't turn into a navigation (scrolled away, cancelled),
     // drop the prewarmed copy again so nothing inactive stays in the layout.
-    const dropStale = () => setTimeout(() => {
-      $$(".route.prewarm").forEach((r) => {
-        if (!r.classList.contains("active")) r.classList.remove("prewarm");
-      });
-    }, 700);
-    document.addEventListener("pointerup", dropStale, { passive: true });
-    document.addEventListener("pointercancel", dropStale, { passive: true });
+    let dropT = 0;
+    const dropStale = (ms) => {
+      clearTimeout(dropT);
+      dropT = setTimeout(() => {
+        if (jump) return;             // the jump owns the home prewarm and clears it
+        $$(".route.prewarm").forEach((r) => {
+          if (!r.classList.contains("active")) r.classList.remove("prewarm");
+        });
+      }, ms);
+    };
+    const pressEnded = () => dropStale(700);
+    document.addEventListener("pointerup", pressEnded, { passive: true });
+    document.addEventListener("pointercancel", pressEnded, { passive: true });
+    document.addEventListener("dragstart", () => dropStale(0));   // a drag is not a tap
 
     document.addEventListener("click", (e) => {
       const a = e.target.closest("a[data-route]");
@@ -1691,91 +1792,74 @@
       const r = a.getAttribute("data-route");
       if (!ROUTES.includes(r)) return;
       e.preventDefault();
-      const from = currentRoute;
-      navigate(r);
       // data-scroll="#id": land on a section of the new page, not its top (the FAQ's
-      // "when our next meeting is here" link now arrives at the countdown).
+      // "when our next meeting is here" link arrives at the countdown).
       const sel = a.dataset.scroll;
-      if (sel && r !== from) {
-        const go = () => { const t = $(sel); if (t) jumpTo(t); };
-        // Touch and reduced motion swap synchronously; the desktop warp swaps at
-        // WARP_SWAP, hidden behind the streaks.
-        if (COARSE || REDUCED) {
-          // Measure without the arrival roll (it starts 14px low), or we overshoot.
-          const act = $(".route.active"), roll = act && act.classList.contains("warp-in-touch");
-          if (roll) act.classList.remove("warp-in-touch");
-          go();
-          if (roll) act.classList.add("warp-in-touch");
-        } else setTimeout(go, WARP_SWAP + 30);
-      }
+      navigate(r, { then: sel && r !== currentRoute ? () => { const t = $(sel); if (t) jumpTo(t); } : null });
     });
 
-    // Back / forward / swipe: close whatever was floating over the page first, so
-    // a viewer or the menu never survives into the route underneath it.
-    const settleOverlays = () => {
-      const raw = (location.hash || "").replace(/^#/, "");
-      if (isOpen("#meetingModal") && !raw.startsWith("meeting-")) closeMeetingModal(true);
-      if (isOpen("#atlasLightbox")) closeAtlasLightbox();
-      if (isOpen("#photoLightbox")) closePhotoLightbox();
+    // Back, forward, swipe, a typed or pasted address, a reload: all come through
+    // here. Reads where we are and makes the page match; running it twice is harmless.
+    let arriveT = 0;
+    const syncToUrl = (boot) => {
+      clearTimeout(arriveT);
+      const st = histState(), isNew = !st.seen;
+      const mm = hashMeeting();
+      const own = st.overlay === "meeting" ? (mm ? "meeting" : null)
+        : (st.overlay === "atlas" && ATLAS[st.i]) || (st.overlay === "photo" && EVENTS[st.ev] && EVENTS[st.ev].photos[st.k] != null) ? st.overlay : null;
+      // A viewer opened from a page belongs over that page (a preview opened from the
+      // About timeline has a meeting address, but About is under it).
+      const base = own && ROUTES.includes(st.from) ? st.from : normalizeRoute(location.hash);
+      const changed = base !== currentRoute;
+      // History moved while a jump was still on its way out, or somewhere the jump
+      // didn't go: the person changed their mind, and they win.
+      if (jump && (!jump.swapped || changed)) cancelJump();
       closeNav();
-    };
-    // A viewer's own entry is always the top of the stack while it's open, so any
-    // popstate means "close it". Forward can land on an atlas/photo entry whose
-    // viewer is long closed: step back off it rather than leave a dead entry.
-    window.addEventListener("popstate", (e) => {
-      settleOverlays();
-      const st = e.state && e.state.overlay;
-      if (st === "atlas" || st === "photo") history.back();
-    });
-    window.addEventListener("hashchange", () => {
-      const raw = (location.hash || "").replace(/^#/, "");
-      const r = normalizeRoute(location.hash);
-      settleOverlays();
-      // Forward onto a preview opened from this page (e.g. the About timeline):
-      // reopen it over the same page instead of switching to Meetings.
-      if (raw.startsWith("meeting-") && history.state && history.state.overlay === "meeting") {
-        const mm = meetingFromSlug(raw);
-        if (mm && !isOpen("#meetingModal")) openMeetingModal(mm.n, { deep: true });
-        return;
-      }
-      if (r !== currentRoute) { activateRoute(r); canonicaliseHash(r); return; }
-      // A meeting link opened while already on Meetings: activateRoute (which owns
-      // the deep-link handling) never ran, so the preview never opened.
-      if (raw.startsWith("meeting-")) {
-        const mm = meetingFromSlug(raw);
-        if (mm && !isOpen("#meetingModal")) {
-          broadcastSeason(mm.yr || "25");
-          // This entry was just added on top of the page: mark it as the
-          // preview's own, so closing pops back instead of leaving a duplicate.
-          try { history.replaceState({ overlay: "meeting" }, "", location.href); } catch (e) {}
-          openMeetingModal(mm.n, { deep: true });
+      if (changed) activateRoute(base, { instant: !!boot });
+      canonicaliseHash(base);
+
+      const shown = openOverlayName();
+      const want = own || (mm ? "meeting" : null);
+      if (shown && shown !== want) hideOverlay(shown);
+      if (shown && changed && document.activeElement === document.body) focusPage();
+      if (want === "atlas") { if (shown !== "atlas") openAtlasLightbox(st.i, "keep"); }
+      else if (want === "photo") { if (shown !== "photo") openPhotoLightbox(st.ev, st.k, "keep"); }
+      else if (own === "meeting") openMeetingModal(mm.n, "keep");
+      else if (mm) {
+        broadcastSeason(mm.yr || "25");
+        // A link to another meeting while a preview is up: just show that one.
+        if (shown === "meeting") openMeetingModal(mm.n, "none");
+        // A link followed while already on Meetings is a new entry on top of the
+        // page: make it the preview's own, so closing steps back off it.
+        else if (!changed && isNew && !boot) { replaceEntry({ seen: 1, overlay: "meeting", from: base, n: mm.n }); openMeetingModal(mm.n, "keep"); }
+        else {
+          // Arrived from elsewhere: let the page land first, then open over its card.
+          const here = location.hash;
+          arriveT = setTimeout(() => {
+            if (location.hash !== here || currentRoute !== base || openOverlayName()) return;
+            const card = document.getElementById(meetingSlug(mm));
+            if (card) jumpTo(card);
+            openMeetingModal(mm.n, "none");
+          }, 400);
         }
-        return;
       }
-      canonicaliseHash(r);
-    });
+      if (isNew && !histState().seen) replaceEntry(Object.assign({}, st, { seen: 1 }));
+    };
+    window.addEventListener("popstate", () => { syncToUrl(); popDone(); });
+    window.addEventListener("hashchange", () => syncToUrl());
 
     // "Skip to content" moves focus to the page's heading. Its old href="#/" was
     // a route in this hash router, so it took you to Home instead.
     const skip = $(".skip-link");
     if (skip) skip.addEventListener("click", (e) => {
       e.preventDefault();
-      const h = $(".route.active h1");
-      if (h) { h.setAttribute("tabindex", "-1"); h.focus(); }
+      focusPage();
     });
 
-    // A reload (or iOS restoring a discarded tab) keeps history.state, including a
-    // viewer marker from before. An atlas/photo entry is a same-URL duplicate of
-    // the page under it, so step off it (it becomes a forward entry the popstate
-    // handler skips). A meeting marker is kept: the deep-link path reopens that
-    // preview on it, and closing it then pops back to where it was opened.
-    { const st0 = history.state && history.state.overlay; if (st0 === "atlas" || st0 === "photo") history.back(); }
     // Every route change starts at the top; the browser restoring an old offset
     // after a Back/Forward raced that and landed at random positions.
     try { if ("scrollRestoration" in history) history.scrollRestoration = "manual"; } catch (e) {}
-    const initial = normalizeRoute(location.hash);
-    activateRoute(initial, { instant: true });
-    canonicaliseHash(initial);
+    syncToUrl(true);
   }
 
   /* -------------------------------------------------------------------
@@ -1816,12 +1900,10 @@
       document.body.classList.toggle("nav-open", open);
       toggle.setAttribute("aria-expanded", String(open));
       toggle.setAttribute("aria-label", open ? "Close menu" : "Open menu");
-      // Keep Tab / VoiceOver inside the open menu instead of the page behind it.
-      [$("#router"), $(".footer"), $("#backTop"), $(".skip-link")].forEach((n) => {
-        if (!n) return;
-        if (open) n.setAttribute("inert", ""); else n.removeAttribute("inert");
-      });
+      refreshPageLock();          // keeps Tab / VoiceOver inside the open menu
       if (open && !was) { const first = links.querySelector("a"); if (first) { try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); } } }
+      // However it closed, focus can't stay on a link inside the hidden drawer.
+      if (!open && was && (links.contains(document.activeElement) || document.activeElement === document.body)) toggle.focus({ preventScroll: true });
     };
     const close = () => setOpen(false);
     closeNav = () => { if (links.classList.contains("open")) close(); };
@@ -1829,13 +1911,13 @@
     scrim.addEventListener("click", close);
     // The drawer only exists up to 860px. Opened, then rotated or widened past
     // that, it vanished but left the page inert and untappable.
-    const drawerMQ = window.matchMedia("(max-width:860px)");
+    const drawerMQ = window.matchMedia("(max-width:53.75em)");
     const onDrawerMQ = () => { if (!drawerMQ.matches) closeNav(); };
     if (drawerMQ.addEventListener) drawerMQ.addEventListener("change", onDrawerMQ);
     else if (drawerMQ.addListener) drawerMQ.addListener(onDrawerMQ);
-    links.querySelectorAll("a").forEach((a) => a.addEventListener("click", close));
+    links.querySelectorAll("a").forEach((a) => a.addEventListener("click", closeNav));
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && links.classList.contains("open")) { close(); toggle.focus({ preventScroll: true }); }
+      if (e.key === "Escape" && links.classList.contains("open")) { close(); }
     });
   }
 
@@ -1851,15 +1933,21 @@
     // light-speed streaks (warpJump). Desktop keeps the canvas for the warp streaks.
     if (COARSE) { canvas.remove(); return; }
     const ctx = canvas.getContext("2d");
+    if (!ctx) { canvas.remove(); return; }
     let w, h, dpr, stars = [], raf = null, scrollY = window.scrollY, shoot = null, shootTimer = 260;
     let warp = 0;
 
+    // One ramp at a time: a newer jump (or 0 = stop) retires the one before it, so two
+    // ramps never fight over the streaks.
+    let ramp = 0;
     window.__warp = function (duration) {
-      duration = duration || 1350;
+      const mine = ++ramp;
+      if (!duration) { warp = 0; return; }
       const start = performance.now();
       const peakIn = 0.4, peakOut = 0.6;   // accelerate to 40%, hold, decelerate from 60%
       const smooth = (x) => x * x * (3 - 2 * x); // smoothstep for eased ramp/decay
       function step(now) {
+        if (mine !== ramp) return;
         const t = Math.min((now - start) / duration, 1);
         if (t < peakIn) warp = smooth(t / peakIn);
         else if (t < peakOut) warp = 1;
@@ -2111,37 +2199,21 @@
       document.body.classList.add("intro");
       setTimeout(() => document.body.classList.remove("intro"), 2400);
     }
-    renderArc();
-    initArcYears();
-    renderMeetings();
-    renderNotes();
-    // Season toggles must run AFTER the meeting/notes cards exist — otherwise the
-    // initial '25–'26 filter applies to an empty grid and the '26–'27 meeting card
-    // is never hidden, so it flashes at the end of the '25–'26 list on first entry.
-    initSeasonToggles();
-    renderTeam();
-    initMailLinks();
-    renderAtlas();
-    initAtlasLightbox();
-    renderEvents();
-    initPhotoLightbox();
-    renderTicker();
-    initHeroEquations();
-    initAmbientParticles();
-    // Cursor spotlight on the plainer inner-route cards too (meeting cards get it
-    // inside renderMeetings). Notes/team keep their own richer hover treatments.
-    initNav();
-    initStars();
-    initReveal();
-    initModal();
-    initCopy();
-    initSignup();
-    initBackTop();
-    initNextMeeting();
-    initScrollSpy();
-    initHeroInteractions();
-    initRouter();
-    initWarpIntro();
+    // One part failing must not take the rest of the site with it: the router used to
+    // be one exception away from never starting, which is a blank page.
+    const steps = [
+      initKeyRepeatGuard,
+      renderArc, initArcYears, renderMeetings, renderNotes,
+      // Season toggles must run AFTER the meeting/notes cards exist — otherwise the
+      // initial '25–'26 filter applies to an empty grid and the '26–'27 meeting card
+      // is never hidden, so it flashes at the end of the '25–'26 list on first entry.
+      initSeasonToggles,
+      renderTeam, initMailLinks, renderAtlas, initAtlasLightbox, renderEvents, initPhotoLightbox,
+      renderTicker, initHeroEquations, initAmbientParticles,
+      initNav, initStars, initReveal, initModal, initCopy, initSignup, initBackTop,
+      initNextMeeting, initScrollSpy, initHeroInteractions, initRouter, initWarpIntro,
+    ];
+    steps.forEach((fn) => { try { fn(); } catch (err) { console.error(fn.name + " failed:", err); } });
     const y = $("#year"); if (y) y.textContent = new Date().getFullYear();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
