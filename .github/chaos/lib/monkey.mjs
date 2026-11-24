@@ -45,6 +45,8 @@ export const tap = (page, x, y) => page.profile.touch ? page.touchscreen.tap(x, 
 export async function monkey(page, { seed, steps = 120, base, onStep, ignore }) {
   const r = rng(seed), pick = (a) => a[Math.floor(r() * a.length)], between = (a, b) => a + (b - a) * r();
   const trace = [], T = page.profile.touch;
+  // A queued Back can interrupt the reload; wait for it and try again.
+  const reopen = async () => { for (let i = 0; i < 5; i++) { try { await page.goto(base); return; } catch { await page.waitForTimeout(400); } } };
   const vp = () => page.viewportSize();
   const home = vp();
   const pt = () => { const v = vp(); return [Math.floor(between(2, v.width - 2)), Math.floor(between(2, v.height - 2))]; };
@@ -108,10 +110,10 @@ export async function monkey(page, { seed, steps = 120, base, onStep, ignore }) 
     try { d = await A[name](); } catch (e) { d = name + " !" + e.message.split("\n")[0]; }
     trace.push(d);
     // Back past the first entry leaves the site, as it does for a person. Walk back in.
-    if (!page.url().startsWith(base)) { await page.goto(base); trace.push("(left the site, reopened)"); continue; }
+    if (!page.url().startsWith(base)) { await reopen(); trace.push("(left the site, reopened)"); continue; }
     if (r() < .55) { await page.waitForTimeout(gap); continue; }
     await settle(page);
-    if (!page.url().startsWith(base)) { await page.goto(base); trace.push("(left the site, reopened)"); continue; }
+    if (!page.url().startsWith(base)) { await reopen(); trace.push("(left the site, reopened)"); continue; }
     // A pinch can leave the page zoomed, where layout coordinates no longer match taps. Zoom back out first.
     if (T && page.engine === "chromium") { const s = await page.evaluate(() => visualViewport.scale); if (s > 1.01) { await page.reload({ waitUntil: "load" }); const c = await cdp(page); await c.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 }); trace.push("(zoom reset)"); await settle(page, 300); } }
     const bad = (await check(page)).filter((b) => !ignore || !ignore.test(b));

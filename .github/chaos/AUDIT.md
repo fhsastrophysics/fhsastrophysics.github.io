@@ -24,8 +24,8 @@ Nothing leaves the machine: other sites are blocked (Google Fonts is fetched onc
 
 | | live site (8e9414b) | this branch |
 |---|---|---|
-| Tests | 170 of 274 pass | RESULT_TESTS |
-| Monkey | RESULT_LIVE_MONKEY | RESULT_MONKEY |
+| Tests | 170 of 274 pass | 278 of 278, twice in a row (4 tests were added after the live count) |
+| Monkey | 0 of 24 runs clean (seed 10) | 48 of 48 clean on the final code (seeds 61-62). Earlier builds of the branch: 48/48 on seeds 31-32, 41-42 and 51-52. A third full pass on the final code was cut short |
 
 ## Bugs fixed
 
@@ -58,8 +58,9 @@ Severity: A = a visitor loses the page, a tap or their place. B = wrong or cut-o
 | 23 | C | desktop | Astronaut stayed "grabbed" after a cancelled drag | only `pointerup` was handled | `pointercancel` and `blur` too | "the astronaut lets go" |
 | 24 | C | all | `#about`, `#//team`, `#/team?x` went Home; `#Meeting-...` not recognised | strict parsing | forgiving parsing | "loose and broken addresses" |
 | 25 | C | all | Em dash in photo descriptions | copy rule missed an alt text | comma | "no em dashes" |
+| 26 | C | touch laptop | Dragging a link in WebKit left a pre-built page in the layout | no pointerup or pointercancel after a native drag | dropped on dragstart, and a press expires by itself | "a press on a link that never ends" (seeds 2, 11, 12) |
 
-The monkey also caught one mistake made during this audit: Back within 350 ms of a tap left `body.warping` set (seed 100, step 40). Covered by "Back right after a tap".
+The monkey also caught one mistake made during this audit: Back within 350 ms of a tap left `body.warping` set (seed 100, step 40). Covered by "Back right after a tap". Bug 2 needed a second fix: on a busy machine Chrome lands an old glide about 0.8 s late.
 
 ## Rules that keep these from coming back
 
