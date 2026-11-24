@@ -352,7 +352,8 @@ test("sign-up never loses a typed address", BOTH, async (p) => {
 
 for (const [label, when, want] of [["before", -90061e3, /Next meeting/], ["during", 60e3, /Happening now/], ["after", 3 * 3600e3, /Last meeting/]])
   test(`next-meeting card reads right ${label} the meeting`, BOTH, async (p) => {
-    await p.clock.install({ time: Date.parse("2026-11-18T12:55:00-08:00") + when }); await p.reload(); await p.clock.runFor(3000); await ev(p, () => { location.hash = "#/join"; }); await p.clock.runFor(2000);
+    const at = await ev(p, () => Date.parse(document.querySelector("#nextMeeting").dataset.when));
+    await p.clock.install({ time: at + when }); await p.reload(); await p.clock.runFor(3000); await ev(p, () => { location.hash = "#/join"; }); await p.clock.runFor(2000);
     const s = await ev(p, () => [document.querySelector(".nextmeet__k").textContent, getComputedStyle(document.querySelector(".nextmeet__clock")).display, document.querySelector('[data-nm-unit="days"]').textContent]);
     return want.test(s[0]) && (label === "before") === (s[1] !== "none") ? [] : [s.join(" | ")];
   });

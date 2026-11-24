@@ -79,8 +79,7 @@ The monkey also caught one mistake made during this audit: Back within 350 ms of
 
 ## Not fixed, for Abir
 
-- The next-meeting card still shows November 18 as "Last meeting"; it needs the next date, topic and room.
-- The FAQ says Room 91 and "around 1:00 PM"; the card says Fair Oaks Room and 12:55 PM. The page description says thirteen meetings and sixteen handouts, which is out of date.
+- The FAQ says "around 1:00 PM"; the card says 12:55 PM. The page description says thirteen meetings and sixteen handouts, which is out of date.
 - The browser tab title is the same on every page. Per-page titles would be new copy.
 - Back always lands at the top of a page. Restoring the old scroll position would undo a choice made on purpose.
 - Back with the phone menu open changes page instead of only closing the menu.
